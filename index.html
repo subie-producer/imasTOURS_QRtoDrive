@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <title>ツアマスQR画像保存</title>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+  <style>
+    body { font-family: sans-serif; line-height: 1.6; padding: 15px; }
+    #video {
+      width: 90%;      /* 画面幅の90% */
+      max-width: 800px; /* ただし最大幅は600px */
+      height: auto;
+      border: 1px solid #ccc;
+      display: block; /* 初期状態は非表示 */
+      margin-bottom: 10px;
+    }
+    #canvas { display: none; } /* キャンバスは描画用で非表示 */
+    #output { margin-top: 15px; padding: 10px; background-color: #f0f0f0; border-radius: 5px; }
+    #status { margin-top: 10px; font-weight: bold; }
+    .loading::after {
+      content: '...';
+      display: inline-block;
+      animation: loading-dots 1s steps(3, end) infinite;
+    }
+    @keyframes loading-dots {
+      0%, 20% { content: '.'; }
+      40% { content: '..'; }
+      60%, 100% { content: '...'; }
+    }
+    button { padding: 10px 15px; font-size: 1em; cursor: pointer; }
+    .error { color: red; }
+    .success { color: green; }
+  </style>
+</head>
+<body>
+  <h1>ツアマスQRコード 画像保存アプリ</h1>
+  <p>カメラを起動して、ツアマスのライブフォトページのQRコードを読み取ってください。</p>
+
+  <button id="startButton">カメラを起動</button>
+  <video id="video" autoplay playsinline muted></video> <canvas id="canvas"></canvas>
+
+  <div id="output">
+    <strong>読み取り結果:</strong> <span id="result">ここにURLが表示されます</span>
+  </div>
+
+  <div id="status"></div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvasElement = document.getElementById('canvas');
+    const canvas = canvasElement.getContext('2d');
+    const outputResult = document.getElementById('result');
+    const statusDiv = document.getElementById('status');
+    const startButton = document.getElementById('startButton');
+    let stream = null;
+    let scanning = false;
+
+    function drawLine(begin, end, color) {
+      canvas.beginPath();
+      canvas.moveTo(begin.x, begin.y);
+      canvas.lineTo(end.x, end.y);
+      canvas.lineWidth = 4;
+      canvas.strokeStyle = color;
+      canvas.stroke();
+    }
+
+    // カメラ映像からQRコードをスキャンする関数
+    function tick() {
+      if (!scanning) return; // スキャン停止中は処理しない
+
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        // ビデオの表示サイズに合わせてキャンバスサイズを設定
+        canvasElement.height = video.videoHeight;
+        canvasElement.width = video.videoWidth;
+        canvas.drawImage(video, 0, 0, canvasElement.width, canvasElement.height);
+        const imageData = canvas.getImageData(0, 0, canvasElement.width, canvasElement.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: "dontInvert", // 通常は反転しない
+        });
+
+        if (code) {
+          // QRコードを検出した場合
+          drawLine(code.location.topLeftCorner, code.location.topRightCorner, "#FF3B58");
+          drawLine(code.location.topRightCorner, code.location.bottomRightCorner, "#FF3B58");
+          drawLine(code.location.bottomRightCorner, code.location.bottomLeftCorner, "#FF3B58");
+          drawLine(code.location.bottomLeftCorner, code.location.topLeftCorner, "#FF3B58");
+
+          // 読み取り成功
+          const qrData = code.data;
+          if (qrData && qrData.startsWith('http')) { // URL形式か簡易チェック
+            scanning = false; // スキャンを停止
+            outputResult.textContent = qrData;
+            statusDiv.textContent = 'QRコードを検出しました。画像を保存中...';
+            statusDiv.className = 'loading'; // ローディング表示
+
+            // サーバーサイドのGAS関数を呼び出し
+            google.script.run
+              .withSuccessHandler(onSaveSuccess)
+              .withFailureHandler(onSaveFailure)
+              .saveImagesFromUrl(qrData);
+
+            // カメラを停止 (任意)
+             stopCamera();
+             startButton.textContent = "再度スキャンする";
+             startButton.disabled = false;
+
+
+          } else {
+            // URL形式でない場合は無視するか、エラー表示
+             console.log("読み取ったデータはURLではありません:", qrData);
+          }
+
+        } else {
+          // QRコードが見つからない場合、次のフレームで再試行
+        }
+      }
+      // 継続的にスキャン
+      if (scanning) {
+         requestAnimationFrame(tick);
+      }
+    }
+
+    // カメラを起動する関数
+    function startCamera() {
+       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+         navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }) // 背面カメラ優先
+           .then(function(mediaStream) {
+             stream = mediaStream;
+             video.srcObject = stream;
+             video.style.display = 'block'; // カメラ映像を表示
+             video.play(); // play() を呼び出す
+             scanning = true;
+             statusDiv.textContent = 'カメラ起動中... QRコードを探しています。';
+             statusDiv.className = '';
+             startButton.textContent = "スキャン中...";
+             startButton.disabled = true;
+             requestAnimationFrame(tick); // スキャン開始
+           })
+           .catch(function(err) {
+             console.error("カメラの起動に失敗しました:", err);
+             statusDiv.textContent = 'エラー: カメラを起動できませんでした。許可を確認してください。';
+             statusDiv.className = 'error';
+             startButton.textContent = "カメラを起動"; // ボタンを元に戻す
+             startButton.disabled = false;
+           });
+       } else {
+          statusDiv.textContent = 'エラー: このブラウザはカメラアクセスに対応していません。';
+          statusDiv.className = 'error';
+       }
+    }
+
+    // カメラを停止する関数
+    function stopCamera() {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+            video.srcObject = null;
+            video.style.display = 'none'; // カメラ映像を非表示
+            stream = null;
+            scanning = false; // スキャン状態をリセット
+        }
+    }
+
+    // 画像保存成功時のコールバック
+    function onSaveSuccess(result) {
+      if (result.success) {
+        statusDiv.textContent = `成功: ${result.message}`;
+        statusDiv.className = 'success';
+      } else {
+        // サーバー側で処理は成功したが、画像が見つからなかった場合など
+        statusDiv.textContent = `情報: ${result.message}`;
+        statusDiv.className = ''; // エラーではないので通常表示
+      }
+      startButton.textContent = "再度スキャンする"; // ボタンを有効化
+      startButton.disabled = false;
+    }
+
+    // 画像保存失敗時のコールバック
+    function onSaveFailure(error) {
+      statusDiv.textContent = `エラー: ${error.message || '画像の保存処理中にエラーが発生しました。'}`;
+      statusDiv.className = 'error';
+      console.error('サーバーサイドエラー:', error);
+      startButton.textContent = "再度スキャンする"; // ボタンを有効化
+      startButton.disabled = false;
+    }
+
+    // スタートボタンのイベントリスナー
+    startButton.addEventListener('click', () => {
+        outputResult.textContent = 'ここにURLが表示されます'; // 表示をリセット
+        statusDiv.textContent = ''; // ステータスをリセット
+        statusDiv.className = '';
+        startCamera(); // カメラを起動
+    });
+
+  </script>
+</body>
+</html>
